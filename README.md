@@ -202,18 +202,21 @@ run_training.bat
 ### การเทรนโมเดลขั้นสูง (Text)
 
 ```bash
-# สำหรับ Windows
+# สำหรับ Windows (ใช้ Accelerate)
 run_advanced_training.bat --use_flash_attn --use_llama3
 
-# สำหรับ Linux/Mac
-python advanced_training.py --output_dir ./fine_tuned_typhoon_advanced --use_flash_attn --use_llama3
+# สำหรับ Linux/Mac (ใช้ Accelerate)
+accelerate launch advanced_training.py --output_dir ./fine_tuned_typhoon_advanced --use_flash_attn --use_llama3
 ```
 
 ### การเทรนโมเดล Vision ขั้นสูง
 
 ```bash
-# สำหรับ Windows
+# สำหรับ Windows (ใช้ Accelerate)
 train_vision_model.bat
+
+# สำหรับ Linux/Mac (ใช้ Accelerate)
+accelerate launch vision_training.py --use_flash_attention --enable_xformers
 ```
 
 สคริปต์นี้จะให้คุณเลือก configuration การเทรน:
@@ -242,14 +245,12 @@ python typhoon_inference.py --model_path ./fine_tuned_typhoon --input_file quest
 
 ## เทคนิคที่ใช้ในโครงการ
 
-- **DeepSeek Techniques**: LoRA ที่ปรับแต่งรูปแบบพิเศษ และการจัดการหน่วยความจำขั้นสูง
-- **Meta AI**: Prefix Tuning แบบพิเศษจาก LLaMA-3
-- **Anthropic**: Constitutional AI และเทคนิคจาก Claude 3.5
-- **Microsoft**: Grouped-Query Attention (GQA) จาก Phi-3
-- **Google**: Gated Mixture of Experts จาก Gemma
-- **RWKV**: Linear Attention แบบไม่ใช้ attention matrix
-- **EleutherAI**: Loss Adaptation เพื่อการเทรนที่มีประสิทธิภาพ
-- **Mistral AI**: Sliding Window Attention เพื่อประมวลผลข้อความยาวได้อย่างมีประสิทธิภาพ
+ดูรายละเอียดเทคนิคขั้นสูงที่ใช้ในแต่ละส่วนได้ที่:
+
+-   **[Advanced Text Training Techniques](./docs/techniques/advanced_text_training.md):** อธิบาย PEFT, QLoRA, Multi-stage Training, DPO, RWKV Attention, LLaMA-3 MoE, Phi-3 GQA, และอื่นๆ
+-   **[Advanced Vision Training Techniques](./docs/techniques/advanced_vision_training.md):** อธิบาย Flash Attention, Advanced Schedulers, Improved VAE, Token Merging, Selective State Updates, 8-bit Adam, และ Constitutional AI checks
+-   **[Vision Processing & Generation Techniques](./docs/techniques/vision_processing_generation.md):** อธิบาย CLIP, Image Enhancement (Real-ESRGAN, HDR-Net, NAFNet), ViT Features, Attention Maps, SDXL, ControlNet, Text-to-Image, และ Image-to-Image
+-   **[Data & Optimization Techniques](./docs/techniques/data_and_optimization.md):** อธิบาย Knowledge Distillation, Constitutional AI Filtering, Safetensors, และ Distributed Training (Accelerate)
 
 ## โครงสร้าง Output
 

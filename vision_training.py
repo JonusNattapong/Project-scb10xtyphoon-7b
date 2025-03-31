@@ -101,14 +101,15 @@ class VisionTrainer:
         if config.enable_selective_state_updates:
             self._setup_selective_state_updates()
         
-        # Move models to device
-        self._move_to_device()
-        
-        # Initialize training state
+        # Initialize Accelerator first
         self.accelerator = Accelerator(
             mixed_precision=config.mixed_precision,
             gradient_accumulation_steps=config.gradient_accumulation_steps
         )
+        self.device = self.accelerator.device # Use device from Accelerator
+        
+        # Move models to device (handled by Accelerator later)
+        # self._move_to_device() # Removed, Accelerator handles this
     
     def _setup_token_merging(self):
         """Setup EleutherAI's Token Merging for efficient attention"""
@@ -126,11 +127,11 @@ class VisionTrainer:
             importance_threshold=0.5
         )
     
-    def _move_to_device(self):
-        """Move models to appropriate device"""
-        logger.info(f"Moving models to {self.device}...")
-        self.pipeline = self.pipeline.to(self.device)
-        self.vae = self.vae.to(self.device)
+    # def _move_to_device(self): # Removed, Accelerator handles this
+    #     """Move models to appropriate device"""
+    #     logger.info(f"Moving models to {self.device}...")
+    #     self.pipeline = self.pipeline.to(self.device)
+    #     self.vae = self.vae.to(self.device)
     
     def train(
         self,
@@ -155,82 +156,122 @@ class VisionTrainer:
         # Initialize wandb
         wandb.init(project="typhoon-vision-training")
         
-        # Prepare optimizer with 8-bit Adam (Meta AI)
+        # Prepare optimizer
+        optimizer_cls = torch.optim.AdamW
         if self.config.use_8bit_adam:
-            import bitsandbytes as bnb
-            optimizer = bnb.optim.AdamW8bit(
-                self.pipeline.unet.parameters(),
-                lr=self.config.learning_rate
-            )
-        else:
-            optimizer = torch.optim.AdamW(
-                self.pipeline.unet.parameters(),
-                lr=self.config.learning_rate
-            )
+            try:
+                import bitsandbytes as bnb
+                optimizer_cls = bnb.optim.AdamW8bit
+                logger.info("Using 8-bit Adam optimizer.")
+            except ImportError:
+                logger.warning("bitsandbytes not found. Falling back to standard AdamW.")
         
-        # Enable gradient checkpointing
+        optimizer = optimizer_cls(
+            self.pipeline.unet.parameters(),
+            lr=self.config.learning_rate
+        )
+        
+        # Prepare DataLoader
+        train_dataloader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True
+        )
+        
+        # Prepare everything with Accelerator
+        self.pipeline.unet, optimizer, train_dataloader = self.accelerator.prepare(
+            self.pipeline.unet, optimizer, train_dataloader
+        )
+        # VAE and text encoder are not trained, move manually if needed by loss
+        self.vae.to(self.accelerator.device)
+        self.pipeline.text_encoder.to(self.accelerator.device)
+        self.pipeline.text_encoder_2.to(self.accelerator.device)
+
+        # Enable gradient checkpointing after prepare
         if gradient_checkpointing:
             self.pipeline.unet.enable_gradient_checkpointing()
-        
+            
         # Prepare for training
         num_epochs = num_epochs or self.config.num_train_epochs
-        num_update_steps_per_epoch = len(train_dataset) // batch_size
+        num_update_steps_per_epoch = len(train_dataloader) // self.config.gradient_accumulation_steps
+        num_total_steps = num_epochs * num_update_steps_per_epoch
         
         # Training loop
         for epoch in range(num_epochs):
-            self.pipeline.train()
+            self.pipeline.unet.train() # Set UNet to train mode
             total_loss = 0
             
-            for step, batch in enumerate(train_dataset):
-                # 1. Constitutional AI check (Anthropic)
-                if not self._constitutional_ai_check(batch):
-                    continue
-                
-                # 2. Prepare inputs
-                pixel_values = self._prepare_pixel_values(batch)
-                text_embeddings = self._prepare_text_embeddings(batch)
-                
-                # 3. DeepMind's improved VAE encoding
-                latents = self.vae.encode(pixel_values).latent_dist.sample()
-                latents = latents * self.vae.config.scaling_factor
-                
-                # 4. Add noise and get timesteps
-                noise = torch.randn_like(latents)
-                timesteps = torch.randint(
-                    0, self.ddpm_scheduler.config.num_train_timesteps,
-                    (latents.shape[0],), device=self.device
-                )
-                noisy_latents = self.ddpm_scheduler.add_noise(latents, noise, timesteps)
-                
-                # 5. Predict noise with selective updates (Microsoft)
+            progress_bar = tqdm(
+                total=num_update_steps_per_epoch, 
+                disable=not self.accelerator.is_local_main_process,
+                desc=f"Epoch {epoch+1}/{num_epochs}"
+            )
+            
+            for step, batch in enumerate(train_dataloader):
                 with self.accelerator.accumulate(self.pipeline.unet):
+                    # 1. Constitutional AI check (Anthropic)
+                    if not self._constitutional_ai_check(batch):
+                        continue
+                    
+                    # 2. Prepare inputs (Move to device is handled by DataLoader via Accelerator)
+                    pixel_values = batch["pixel_values"] # Already on correct device
+                    text_embeddings = self._prepare_text_embeddings(batch) # Needs manual handling or dataset transform
+                    
+                    # 3. DeepMind's improved VAE encoding
+                    with torch.no_grad(): # VAE is not trained
+                        latents = self.vae.encode(pixel_values).latent_dist.sample()
+                    latents = latents * self.vae.config.scaling_factor
+                    
+                    # 4. Add noise and get timesteps
+                    noise = torch.randn_like(latents)
+                    timesteps = torch.randint(
+                        0, self.ddpm_scheduler.config.num_train_timesteps,
+                        (latents.shape[0],), device=latents.device # Use latent's device
+                    ).long()
+                    noisy_latents = self.ddpm_scheduler.add_noise(latents, noise, timesteps)
+                    
+                    # 5. Predict noise with selective updates (Microsoft)
                     noise_pred = self.pipeline.unet(
                         noisy_latents, timesteps, text_embeddings
                     ).sample
                     
                     # Calculate loss
-                    loss = nn.functional.mse_loss(noise_pred, noise, reduction="none").mean()
-                    total_loss += loss.item()
+                    loss = nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+                    
+                    # Gather loss across processes for logging
+                    avg_loss = self.accelerator.gather(loss.repeat(batch_size)).mean()
+                    total_loss += avg_loss.item() / self.config.gradient_accumulation_steps
                     
                     # Backward pass and optimization
                     self.accelerator.backward(loss)
+                    if self.accelerator.sync_gradients:
+                        self.accelerator.clip_grad_norm_(self.pipeline.unet.parameters(), 1.0)
                     optimizer.step()
                     optimizer.zero_grad()
+
+                # Checks if the accelerator has performed an optimization step behind the scenes
+                if self.accelerator.sync_gradients:
+                    progress_bar.update(1)
+                    progress_bar.set_postfix(loss=total_loss / (step / self.config.gradient_accumulation_steps + 1))
             
-            # Log metrics
-            avg_loss = total_loss / num_update_steps_per_epoch
-            wandb.log({
-                "epoch": epoch,
-                "train_loss": avg_loss,
-            })
+            progress_bar.close()
             
-            # Validation
-            if validation_dataset is not None:
-                self._run_validation(validation_dataset, epoch)
+            # Log metrics only on main process
+            if self.accelerator.is_main_process:
+                avg_epoch_loss = total_loss / num_update_steps_per_epoch
+                wandb.log({
+                    "epoch": epoch,
+                    "train_loss": avg_epoch_loss,
+                })
+                logger.info(f"Epoch {epoch+1} finished. Average Loss: {avg_epoch_loss:.4f}")
             
-            # Save checkpoint
-            if (epoch + 1) % 10 == 0:
-                self._save_checkpoint(epoch)
+                # Validation only on main process
+                if validation_dataset is not None:
+                    self._run_validation(validation_dataset, epoch)
+                
+                # Save checkpoint only on main process
+                if (epoch + 1) % 10 == 0:
+                    self._save_checkpoint(epoch)
         
         wandb.finish()
         logger.info("Training completed successfully!")
@@ -246,35 +287,74 @@ class VisionTrainer:
     
     def _prepare_text_embeddings(self, batch):
         """Prepare text embeddings with advanced tokenization"""
-        return batch["text_embeddings"].to(self.device)
+        # Assuming batch contains prompts, needs tokenization and encoding
+        # This should ideally be done in the Dataset __getitem__ or collate_fn
+        # For simplicity, let's assume it's pre-computed or handle it here
+        prompts = batch.get("prompt", [""] * len(batch["pixel_values"]))
+        
+        # Tokenize and encode prompts using the pipeline's text encoders
+        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = self.pipeline.encode_prompt(
+            prompt=prompts,
+            device=self.accelerator.device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=False # No CFG during training
+        )
+        return prompt_embeds # Use the main prompt embeds for training
     
     def _run_validation(self, validation_dataset, epoch):
-        """Run validation with sample image generation"""
-        self.pipeline.eval()
+        """Run validation with sample image generation (on main process)"""
+        if not self.accelerator.is_main_process:
+            return
+            
+        logger.info("Running validation...")
+        unwrapped_pipeline = self.accelerator.unwrap_model(self.pipeline) # Use unwrapped model for generation
+        unwrapped_pipeline.eval()
+        
+        # Prepare validation prompts/data
+        # Assuming validation_dataset is a simple list of prompts for now
+        val_prompts = validation_dataset[:4] # Generate 4 samples
+        
         with torch.no_grad():
             # Generate sample images
-            sample_images = self.pipeline(
-                validation_dataset[0]["prompt"],
+            sample_images = unwrapped_pipeline(
+                prompt=val_prompts,
                 num_inference_steps=30,
                 guidance_scale=7.5
-            ).images[0]
+            ).images
             
             # Log to wandb
-            wandb.log({
-                "validation_samples": [wandb.Image(img) for img in sample_images],
-                "epoch": epoch
-            })
+            try:
+                wandb.log({
+                    "validation_samples": [wandb.Image(img, caption=prompt) for img, prompt in zip(sample_images, val_prompts)],
+                    "epoch": epoch
+                })
+                logger.info("Logged validation samples to wandb.")
+            except Exception as e:
+                logger.error(f"Failed to log validation samples to wandb: {e}")
     
     def _save_checkpoint(self, epoch):
-        """Save model checkpoint with safetensors"""
+        """Save model checkpoint with safetensors (on main process)"""
+        if not self.accelerator.is_main_process:
+            return
+            
         save_dir = "outputs/models/vision/checkpoints"
         os.makedirs(save_dir, exist_ok=True)
         save_path = os.path.join(save_dir, f"vision_model_epoch_{epoch}")
-        self.pipeline.save_pretrained(
-            save_path,
-            safe_serialization=True
-        )
-        logger.info(f"Saved checkpoint to {save_path}")
+        
+        # Wait for all processes before saving
+        self.accelerator.wait_for_everyone()
+        
+        # Unwrap the model before saving
+        unwrapped_pipeline = self.accelerator.unwrap_model(self.pipeline)
+        
+        try:
+            unwrapped_pipeline.save_pretrained(
+                save_path,
+                safe_serialization=True
+            )
+            logger.info(f"Saved checkpoint to {save_path}")
+        except Exception as e:
+            logger.error(f"Failed to save checkpoint: {e}")
 
 def main():
     """Main function for vision model training"""
