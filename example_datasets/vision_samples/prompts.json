@@ -1,0 +1,55 @@
+{
+  "generation_examples": [
+    {
+      "name": "Thai Temple",
+      "prompt": "Ancient Thai temple with golden spires, intricate architectural details, traditional Thai style, beautiful ornate decorations, dramatic lighting, photorealistic, masterpiece quality",
+      "negative_prompt": "modern buildings, people, vehicles, poor quality, blurry",
+      "width": 1024,
+      "height": 1024,
+      "guidance_scale": 7.5,
+      "num_inference_steps": 50
+    },
+    {
+      "name": "Thai Food",
+      "prompt": "Authentic Thai dish with colorful ingredients, steam rising, beautiful plating, professional food photography, soft natural lighting, shallow depth of field",
+      "negative_prompt": "ugly, blurry, overexposed, plastic food",
+      "width": 1024,
+      "height": 768,
+      "guidance_scale": 8.0,
+      "num_inference_steps": 45
+    },
+    {
+      "name": "Thai Dance",
+      "prompt": "Traditional Thai dancer in elaborate costume, gold headdress, graceful pose, professional studio lighting, artistic composition, high detail",
+      "negative_prompt": "modern clothing, casual poses, low quality",
+      "width": 768,
+      "height": 1024,
+      "guidance_scale": 7.0,
+      "num_inference_steps": 40
+    }
+  ],
+  "style_transfer_examples": [
+    {
+      "name": "Thai Art Style",
+      "style_prompt": "Traditional Thai painting style, gold leaf details, vivid colors, intricate patterns",
+      "strength": 0.8
+    },
+    {
+      "name": "Modern Thai",
+      "style_prompt": "Contemporary Thai art style, minimalist, elegant, subtle cultural elements",
+      "strength": 0.7
+    }
+  ],
+  "enhancement_examples": [
+    {
+      "name": "Temple Enhancement",
+      "prompt": "Enhance architectural details, improve lighting, add golden glow, increase sharpness",
+      "strength": 0.6
+    },
+    {
+      "name": "Food Enhancement",
+      "prompt": "Enhance food textures, improve color saturation, add steam effects, natural lighting",
+      "strength": 0.5
+    }
+  ]
+}

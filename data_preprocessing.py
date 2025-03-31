@@ -12,15 +12,20 @@ import torch
 from PIL import Image
 import base64
 from io import BytesIO
+from vision_utils import VisionEnhancer
 from transformers import AutoModelForCausalLM, AutoTokenizer as TeacherTokenizer
 import torch.nn.functional as F
+
+# Setup logging directory
+LOG_DIR = "outputs/logs/data_preprocessing"
+os.makedirs(LOG_DIR, exist_ok=True)
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("data_preprocessing.log"),
+        logging.FileHandler(os.path.join(LOG_DIR, "data_preprocessing.log")),
         logging.StreamHandler()
     ]
 )
@@ -69,32 +74,58 @@ def encode_image(image_path):
         return None
 
 def prepare_vision_dataset(dataset, image_column="image", text_column="text", caption_column="caption"):
-    """Prepare a vision dataset with images and text/captions."""
-    logger.info("Preparing vision dataset...")
+    """Prepare a vision dataset with images and text/captions using advanced techniques."""
+    logger.info("Preparing vision dataset with advanced processing...")
+    
+    # Initialize vision enhancer
+    enhancer = VisionEnhancer()
     
     def process_vision_data(examples):
         processed_data = {
             "text": [],
-            "image_data": []
+            "image_data": [],
+            "features": [],
+            "attention_maps": []
         }
         
         for i in range(len(examples[image_column])):
-            # Get image path or data
-            image_data = examples[image_column][i]
-            # Get associated text
+            # Get data
+            image_path = examples[image_column][i]
             text = examples.get(text_column, [""] * len(examples[image_column]))[i]
             caption = examples.get(caption_column, [""] * len(examples[image_column]))[i]
             
-            # Encode image if it's a file path
-            if isinstance(image_data, str) and os.path.isfile(image_data):
-                image_base64 = encode_image(image_data)
-                if image_base64:
+            if isinstance(image_path, str) and os.path.isfile(image_path):
+                try:
+                    # Enhance image quality
+                    enhanced_image = enhancer.enhance_image(image_path)
+                    
+                    # Extract features and attention maps
+                    vision_info = enhancer.extract_features(
+                        enhanced_image,
+                        text_prompt=caption if caption else text
+                    )
+                    
+                    # Encode enhanced image
+                    buffer = BytesIO()
+                    enhanced_image.save(buffer, format="JPEG")
+                    image_base64 = base64.b64encode(buffer.getvalue()).decode()
+                    
+                    # Store all information
                     processed_data["image_data"].append(image_base64)
-                    # Combine text and caption if available
+                    processed_data["features"].append(vision_info["image_features"].cpu().numpy())
+                    processed_data["attention_maps"].append(vision_info["attention_maps"].cpu().numpy())
+                    
+                    # Combine text with features
                     combined_text = text
                     if caption:
                         combined_text = f"{text}\nCaption: {caption}" if text else caption
+                    if vision_info["similarity_score"] is not None:
+                        combined_text += f"\nFeature Score: {float(vision_info['similarity_score'][0][0]):.3f}"
                     processed_data["text"].append(combined_text)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing image {image_path}: {str(e)}")
+                    continue
             
         return processed_data
     
@@ -339,7 +370,7 @@ def main():
     parser = argparse.ArgumentParser(description="Data Preprocessing for Typhoon Model")
     parser.add_argument("--input_file", type=str, help="Input file path for custom dataset")
     parser.add_argument("--input_type", type=str, default="csv", choices=["csv", "json", "jsonl", "text"], help="Input file type")
-    parser.add_argument("--output_dir", type=str, required=True, help="Output directory for processed dataset")
+    parser.add_argument("--output_dir", type=str, default="outputs/processed_data", help="Base output directory for processed dataset")
     parser.add_argument("--tokenizer_name", type=str, default="scb10x/typhoon-7b", help="Tokenizer to use")
     parser.add_argument("--processor_name", type=str, help="Vision processor to use for image processing")
     parser.add_argument("--dataset_type", type=str, default="text", 
@@ -352,8 +383,17 @@ def main():
     parser.add_argument("--caption_column", type=str, help="Column name for image captions")
     args = parser.parse_args()
     
+    # Determine specific output path based on dataset type
+    specific_output_dir = os.path.join(args.output_dir, args.dataset_type)
+    if args.input_file:
+        dataset_name = os.path.splitext(os.path.basename(args.input_file))[0]
+        specific_output_dir = os.path.join(specific_output_dir, dataset_name)
+    elif args.hf_dataset:
+        dataset_name = args.hf_dataset.replace("/", "_")
+        specific_output_dir = os.path.join(specific_output_dir, dataset_name)
+    
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(specific_output_dir, exist_ok=True)
     
     # Load tokenizer
     logger.info(f"Loading tokenizer: {args.tokenizer_name}")
@@ -397,18 +437,19 @@ def main():
     })
     
     # Save processed dataset
-    dataset_dict.save_to_disk(args.output_dir)
-    logger.info(f"Saved processed dataset to {args.output_dir}")
+    dataset_dict.save_to_disk(specific_output_dir)
+    logger.info(f"Saved processed dataset to {specific_output_dir}")
     
     # Save a sample of the processed text for inspection
     sample_size = min(10, len(processed_dataset))
     sample_texts = processed_dataset["text"][:sample_size]
     
-    with open(os.path.join(args.output_dir, "sample_texts.txt"), "w", encoding="utf-8") as f:
+    sample_file_path = os.path.join(specific_output_dir, "sample_texts.txt")
+    with open(sample_file_path, "w", encoding="utf-8") as f:
         for i, text in enumerate(sample_texts):
             f.write(f"=== Sample {i+1} ===\n{text}\n\n")
     
-    logger.info(f"Saved {sample_size} sample texts to {os.path.join(args.output_dir, 'sample_texts.txt')}")
+    logger.info(f"Saved {sample_size} sample texts to {sample_file_path}")
     logger.info("Preprocessing completed successfully!")
 
 if __name__ == "__main__":

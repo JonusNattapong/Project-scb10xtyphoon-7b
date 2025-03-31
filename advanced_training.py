@@ -26,12 +26,16 @@ from deepseek_utils import (
     apply_phi3_grouped_query_attention,
 )
 
+# Setup logging directory
+LOG_DIR = "outputs/logs/text_training"
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("advanced_training.log"),
+        logging.FileHandler(os.path.join(LOG_DIR, "advanced_training.log")),
         logging.StreamHandler()
     ]
 )
@@ -237,7 +241,7 @@ def prepare_advanced_datasets(tokenizer, cache_dir=None):
     
     return tokenized_dataset
 
-def train_with_advanced_techniques(model, tokenizer, tokenized_dataset, output_dir="./results", resume_from_checkpoint=None):
+def train_with_advanced_techniques(model, tokenizer, tokenized_dataset, output_dir="outputs/models/text", resume_from_checkpoint=None):
     """
     Train the model with advanced techniques from recent research.
     
@@ -367,7 +371,7 @@ def train_with_advanced_techniques(model, tokenizer, tokenized_dataset, output_d
 def main():
     """Main function for advanced training."""
     parser = argparse.ArgumentParser(description="Advanced Training for Typhoon Model")
-    parser.add_argument("--output_dir", type=str, default="./fine_tuned_typhoon_advanced", help="Output directory")
+    parser.add_argument("--output_dir", type=str, default="outputs/models/text", help="Base output directory for models")
     parser.add_argument("--cache_dir", type=str, default="./cache", help="Cache directory")
     parser.add_argument("--model_path", type=str, default=None, help="Path to base model (use typhoon-7b if None)")
     parser.add_argument("--quantization", type=str, default="4bit", choices=["4bit", "8bit", "none"], help="Quantization mode")
@@ -416,12 +420,16 @@ def main():
         resume_from_checkpoint=args.resume_from_checkpoint
     )
     
+    # Determine final model save path
+    final_model_path = os.path.join(args.output_dir, experiment_name)
+    os.makedirs(final_model_path, exist_ok=True)
+    
     # Save the model
-    trained_model.save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    trained_model.save_pretrained(final_model_path)
+    tokenizer.save_pretrained(final_model_path)
     
     # Save model info file
-    with open(os.path.join(args.output_dir, "model_info.txt"), "w") as f:
+    with open(os.path.join(final_model_path, "model_info.txt"), "w") as f:
         f.write(f"Advanced training completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Model type: {trained_model.__class__.__name__}\n")
         f.write(f"Quantization: {args.quantization}\n")
