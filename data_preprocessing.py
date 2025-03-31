@@ -4,10 +4,16 @@ import logging
 import pandas as pd
 import numpy as np
 from datasets import load_dataset, Dataset, DatasetDict
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoProcessor
 import re
 import json
 from tqdm import tqdm
+import torch
+from PIL import Image
+import base64
+from io import BytesIO
+from transformers import AutoModelForCausalLM, AutoTokenizer as TeacherTokenizer
+import torch.nn.functional as F
 
 # Set up logging
 logging.basicConfig(
@@ -41,13 +47,76 @@ def clean_text(text, keep_newlines=True):
     
     return text
 
-def prepare_conversation_dataset(dataset, format_template="User: {question}\nAssistant: {answer}"):
+def encode_image(image_path):
+    """Encode image to base64 string."""
+    try:
+        with Image.open(image_path) as img:
+            # Convert to RGB if necessary
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            # Resize if too large (optional)
+            max_size = 1024
+            if max(img.size) > max_size:
+                ratio = max_size / max(img.size)
+                new_size = tuple(int(dim * ratio) for dim in img.size)
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+            # Convert to base64
+            buffered = BytesIO()
+            img.save(buffered, format="JPEG")
+            return base64.b64encode(buffered.getvalue()).decode()
+    except Exception as e:
+        logging.error(f"Error processing image {image_path}: {str(e)}")
+        return None
+
+def prepare_vision_dataset(dataset, image_column="image", text_column="text", caption_column="caption"):
+    """Prepare a vision dataset with images and text/captions."""
+    logger.info("Preparing vision dataset...")
+    
+    def process_vision_data(examples):
+        processed_data = {
+            "text": [],
+            "image_data": []
+        }
+        
+        for i in range(len(examples[image_column])):
+            # Get image path or data
+            image_data = examples[image_column][i]
+            # Get associated text
+            text = examples.get(text_column, [""] * len(examples[image_column]))[i]
+            caption = examples.get(caption_column, [""] * len(examples[image_column]))[i]
+            
+            # Encode image if it's a file path
+            if isinstance(image_data, str) and os.path.isfile(image_data):
+                image_base64 = encode_image(image_data)
+                if image_base64:
+                    processed_data["image_data"].append(image_base64)
+                    # Combine text and caption if available
+                    combined_text = text
+                    if caption:
+                        combined_text = f"{text}\nCaption: {caption}" if text else caption
+                    processed_data["text"].append(combined_text)
+            
+        return processed_data
+    
+    # Process the dataset
+    processed_dataset = dataset.map(
+        process_vision_data,
+        batched=True,
+        remove_columns=dataset.column_names
+    )
+    
+    logger.info(f"Processed {len(processed_dataset)} vision examples")
+    return processed_dataset
+
+def prepare_conversation_dataset(dataset, format_template="User: {question}\nAssistant: {answer}", image_column=None):
     """Prepare a conversation dataset using the provided template."""
     logger.info("Preparing conversation dataset...")
     
     # Function to format conversations
     def format_conversations(examples):
         conversations = []
+        image_data = []
+        
         for i in range(len(examples['question'])):
             question = examples['question'][i]
             answer = examples['answer'][i] if 'answer' in examples else ""
@@ -59,11 +128,24 @@ def prepare_conversation_dataset(dataset, format_template="User: {question}\nAss
             question = clean_text(question)
             answer = clean_text(answer)
             
+            # Handle image if available
+            if image_column and image_column in examples:
+                image = examples[image_column][i]
+                if isinstance(image, str) and os.path.isfile(image):
+                    image_base64 = encode_image(image)
+                    if image_base64:
+                        image_data.append(image_base64)
+                    else:
+                        continue
+            
             # Format the conversation
             conversation = format_template.format(question=question, answer=answer)
             conversations.append(conversation)
         
-        return {"text": conversations}
+        result = {"text": conversations}
+        if image_data:
+            result["image_data"] = image_data
+        return result
     
     # Process the dataset
     processed_dataset = dataset.map(
@@ -184,6 +266,74 @@ def load_custom_dataset(file_path, dataset_type="csv"):
     logger.info(f"Loaded dataset with {len(dataset)} examples")
     return dataset
 
+def generate_teacher_outputs(dataset, teacher_model_name="microsoft/OmniParser-v2.0"):
+    """Generate outputs from teacher model for knowledge distillation."""
+    logger.info(f"Generating teacher outputs using {teacher_model_name}...")
+    
+    # Load teacher model and tokenizer
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    teacher_tokenizer = TeacherTokenizer.from_pretrained(teacher_model_name)
+    teacher_model = AutoModelForCausalLM.from_pretrained(teacher_model_name).to(device)
+    teacher_model.eval()
+    
+    def get_teacher_logits(examples):
+        teacher_outputs = []
+        
+        with torch.no_grad():
+            for text in examples["text"]:
+                # Tokenize input
+                inputs = teacher_tokenizer(
+                    text,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=512
+                ).to(device)
+                
+                # Get teacher predictions
+                outputs = teacher_model(**inputs)
+                logits = outputs.logits
+                
+                # Get probabilities using softmax
+                probs = F.softmax(logits, dim=-1)
+                
+                # Convert to CPU and numpy for storage
+                probs = probs.cpu().numpy()
+                
+                teacher_outputs.append(probs)
+        
+        return {"teacher_logits": teacher_outputs}
+    
+    # Generate teacher outputs
+    dataset_with_teacher = dataset.map(
+        get_teacher_logits,
+        batched=True,
+        batch_size=8,  # Adjust based on GPU memory
+        desc="Generating teacher outputs"
+    )
+    
+    logger.info("Completed teacher output generation")
+    return dataset_with_teacher
+
+def prepare_teacher_student_dataset(dataset, text_column="text"):
+    """Prepare dataset for teacher-student learning."""
+    logger.info("Preparing teacher-student dataset...")
+    
+    # Generate teacher outputs
+    dataset_with_teacher = generate_teacher_outputs(dataset)
+    
+    # Clean the text
+    def clean_dataset_text(examples):
+        cleaned_texts = [clean_text(text) for text in examples[text_column]]
+        return {text_column: cleaned_texts}
+    
+    processed_dataset = dataset_with_teacher.map(
+        clean_dataset_text,
+        batched=True
+    )
+    
+    logger.info(f"Processed {len(processed_dataset)} teacher-student examples")
+    return processed_dataset
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Data Preprocessing for Typhoon Model")
@@ -191,10 +341,15 @@ def main():
     parser.add_argument("--input_type", type=str, default="csv", choices=["csv", "json", "jsonl", "text"], help="Input file type")
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory for processed dataset")
     parser.add_argument("--tokenizer_name", type=str, default="scb10x/typhoon-7b", help="Tokenizer to use")
-    parser.add_argument("--dataset_type", type=str, default="text", choices=["text", "conversation", "instruction"], help="Type of dataset to prepare")
+    parser.add_argument("--processor_name", type=str, help="Vision processor to use for image processing")
+    parser.add_argument("--dataset_type", type=str, default="text", 
+                       choices=["text", "conversation", "instruction", "vision", "teacher_student"], 
+                       help="Type of dataset to prepare")
     parser.add_argument("--hf_dataset", type=str, help="Hugging Face dataset to use instead of input file")
     parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length for tokenization")
     parser.add_argument("--text_column", type=str, default="text", help="Column name for text data")
+    parser.add_argument("--image_column", type=str, help="Column name for image data")
+    parser.add_argument("--caption_column", type=str, help="Column name for image captions")
     args = parser.parse_args()
     
     # Create output directory
@@ -214,11 +369,21 @@ def main():
         logger.error("Either --input_file or --hf_dataset must be specified")
         return
     
+    # Load processor if needed
+    processor = None
+    if args.processor_name:
+        logger.info(f"Loading processor: {args.processor_name}")
+        processor = AutoProcessor.from_pretrained(args.processor_name)
+    
     # Process dataset based on type
     if args.dataset_type == "conversation":
-        processed_dataset = prepare_conversation_dataset(dataset)
+        processed_dataset = prepare_conversation_dataset(dataset, image_column=args.image_column)
     elif args.dataset_type == "instruction":
         processed_dataset = prepare_instruction_dataset(dataset)
+    elif args.dataset_type == "vision":
+        processed_dataset = prepare_vision_dataset(dataset, args.image_column, args.text_column, args.caption_column)
+    elif args.dataset_type == "teacher_student":
+        processed_dataset = prepare_teacher_student_dataset(dataset, args.text_column)
     else:
         processed_dataset = prepare_text_dataset(dataset, args.text_column)
     

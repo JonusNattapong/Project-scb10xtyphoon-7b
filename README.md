@@ -2,6 +2,94 @@
 
 โครงการปรับแต่งโมเดล Typhoon-7B ด้วยเทคนิคขั้นสูงจากงานวิจัยล่าสุด เพื่อให้มีความสามารถในการเข้าใจและตอบคำถามภาษาไทยได้ดียิ่งขึ้น
 
+## Workflow Overview
+
+```mermaid
+graph TD
+    A[Input Data] --> B[prepare_dataset.bat]
+    B --> C{เลือกประเภทข้อมูล}
+    C --> D[Text Dataset]
+    C --> E[Conversation Dataset]
+    C --> F[Instruction Dataset]
+    C --> G[Vision Dataset]
+    C --> H[Teacher-Student Dataset]
+    
+    subgraph "Data Processing"
+        D --> I[Clean Text]
+        E --> I
+        F --> I
+        G --> J[Process Images]
+        H --> K[Generate Teacher Outputs]
+        
+        J --> I
+        K --> I
+        
+        I --> L[Tokenization]
+        L --> M[Train/Test Split]
+    end
+    
+    M --> N[Processed Dataset]
+    N --> O[Training]
+```
+
+## Text Dataset Workflow
+
+```mermaid
+graph LR
+    A[Input .txt] --> B[Clean Text]
+    B --> C[Remove Extra Whitespace]
+    C --> D[Handle Newlines]
+    D --> E[Tokenization]
+    E --> F[Train/Test Split]
+```
+
+## Conversation Dataset Workflow
+
+```mermaid
+graph LR
+    A[Input .csv] --> B[Extract QA Pairs]
+    B --> C[Format Template]
+    C --> D[Clean Text]
+    D --> E[Optional: Add Images]
+    E --> F[Tokenization]
+    F --> G[Train/Test Split]
+```
+
+## Vision Dataset Workflow
+
+```mermaid
+graph TD
+    A[Input .csv] --> B[Load Images]
+    B --> C[Process Images]
+    C --> D[Resize if needed]
+    D --> E[Convert to RGB]
+    E --> F[Base64 Encoding]
+    
+    A --> G[Extract Text/Captions]
+    G --> H[Clean Text]
+    
+    F --> I[Combine Data]
+    H --> I
+    I --> J[Tokenization]
+    J --> K[Train/Test Split]
+```
+
+## Teacher-Student Learning Workflow
+
+```mermaid
+graph TD
+    A[Input Text] --> B[Load Teacher Model]
+    B --> C[Generate Logits]
+    C --> D[Apply Softmax]
+    
+    A --> E[Clean Text]
+    E --> F[Student Training Data]
+    
+    D --> G[Knowledge Distillation]
+    F --> G
+    G --> H[Final Dataset]
+```
+
 ## คุณสมบัติหลัก
 
 - ใช้เทคนิคจากโมเดลล่าสุด: LLaMA-3, Claude 3.5, Gemma, DeepSeek, Phi-3
