@@ -189,7 +189,18 @@ python data_preprocessing.py --input_file instructions.json --input_type json --
 
 ## การใช้งาน
 
-### การเทรนโมเดลพื้นฐาน
+ดูคู่มือการใช้งานฉบับเต็มได้ที่:
+-   **[User Guide](./docs/USAGE.md)**
+
+คู่มือนี้ประกอบด้วย:
+-   การติดตั้ง (Setup)
+-   การเตรียมข้อมูล (Data Preparation) - ทั้งแบบอัตโนมัติและ custom
+-   การเทรนโมเดล (Training) - ทั้ง Text และ Vision (พื้นฐานและขั้นสูง)
+-   การใช้งานโมเดล (Inference) - ทั้ง Text และ Vision (Image Generation)
+
+### ตัวอย่างการใช้งานสคริปต์หลัก
+
+#### การเทรนโมเดลพื้นฐาน (Text)
 
 ```bash
 # สำหรับ Linux/Mac
@@ -316,6 +327,11 @@ outputs/
 - [Anthropic Claude 3.5 Technical Report](https://www.anthropic.com/claude)
 - [EleutherAI Research](https://www.eleuther.ai/)
 - [Microsoft Phi-3 Technical Report](https://www.microsoft.com/en-us/research/blog/phi-3-technical-report/)
+
+## การประเมินทรัพยากร
+
+ดูรายละเอียดทรัพยากรที่แนะนำ (Hardware, Software, Data, Storage) ได้ที่:
+-   **[Resource Estimation](./docs/RESOURCE_ESTIMATION.md)**
 
 ## Latest Updates (2025/04)
 
